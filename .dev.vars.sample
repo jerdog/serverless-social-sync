@@ -7,6 +7,9 @@ POSTS_TO_SYNC="10"
 # Whether to ignore reposts/reblogs (true/false)
 IGNORE_REPOSTS="true"
 
+# Dry run mode - set to true to simulate without posting
+DRY_RUN="true"
+
 # Mastodon Configuration
 MASTODON_URL="https://mastodon.social"
 MASTODON_USERNAME="your-username"
@@ -18,4 +21,4 @@ BLUESKY_PASSWORD="your-app-password"
 
 # Optional: Set a specific last sync time for testing
 # Format: ISO 8601 timestamp
-# LAST_SYNC="2023-12-01T00:00:00Z"
+# LAST_SYNC="2024-01-01T00:00:00Z"
