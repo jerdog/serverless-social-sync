@@ -19,6 +19,7 @@
  * @property {string} targetId - Synced post ID or 'DRY_RUN' if simulating
  * @property {string} text - Post content
  * @property {boolean} simulated - Whether this was a dry run
+ * @property {string} timestamp - Timestamp of the post
  */
 
 /**
@@ -30,7 +31,6 @@
  */
 
 import { BskyAgent } from '@atproto/api'
-import { createRestAPIClient } from 'masto'
 
 /**
  * Service class for bidirectional synchronization between Bluesky and Mastodon
@@ -47,6 +47,37 @@ export class SocialSyncService {
     this.ignoreReposts = config.ignoreReposts
     this.lastSync = config.lastSync
     this.dryRun = config.dryRun || false
+    this.mastodonApi = null
+    this.bsky = null
+  }
+
+  /**
+   * Makes an authenticated request to the Mastodon API
+   */
+  async mastodonRequest(endpoint, options = {}) {
+    const url = new URL(endpoint, this.config.mastodonUrl).toString()
+    const headers = {
+      'Authorization': `Bearer ${this.config.mastodonAccessToken}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      ...options.headers
+    }
+
+    if (this.debug) {
+      console.log(`[DEBUG] Mastodon API Request: ${url}`)
+    }
+
+    const response = await fetch(url, {
+      ...options,
+      headers
+    })
+
+    if (!response.ok) {
+      const text = await response.text()
+      throw new Error(`Mastodon API error: ${response.status} ${text}`)
+    }
+
+    return response.json()
   }
 
   /**
@@ -55,22 +86,111 @@ export class SocialSyncService {
    * @throws {Error} If authentication fails
    */
   async initialize() {
-    // Initialize Bluesky client
-    this.bsky = new BskyAgent({
-      service: 'https://bsky.social'
-    })
+    if (this.debug) {
+      console.log('[DEBUG] Initializing social connections...')
+    }
 
-    // Initialize Mastodon client
-    this.masto = createRestAPIClient({
-      url: this.config.mastodonUrl,
-      accessToken: this.config.mastodonAccessToken
-    })
+    // Test Mastodon connection first
+    try {
+      // 1. Test instance connectivity
+      const instanceResponse = await fetch(new URL('/api/v1/instance', this.config.mastodonUrl).toString())
+      if (!instanceResponse.ok) {
+        throw new Error(`Cannot reach Mastodon instance: ${instanceResponse.status}`)
+      }
+      const instance = await instanceResponse.json()
+      
+      if (this.debug) {
+        console.log('[DEBUG] Connected to Mastodon instance:', instance.uri)
+      }
 
-    // Login to Bluesky
-    await this.bsky.login({
-      identifier: this.config.blueskyUsername,
-      password: this.config.blueskyPassword
-    })
+      // 2. Verify credentials
+      const account = await this.mastodonRequest('/api/v1/accounts/verify_credentials')
+      
+      if (this.debug) {
+        console.log('[DEBUG] Mastodon auth successful:', {
+          username: account.username,
+          acct: account.acct,
+          id: account.id
+        })
+      }
+
+      // Store account info
+      this.mastodonAccount = account
+
+    } catch (error) {
+      console.error('[ERROR] Mastodon initialization failed:', error)
+      throw error
+    }
+
+    // Initialize Bluesky
+    try {
+      this.bsky = new BskyAgent({
+        service: 'https://bsky.social'
+      })
+
+      await this.bsky.login({
+        identifier: this.config.blueskyUsername,
+        password: this.config.blueskyPassword
+      })
+
+      if (this.debug) {
+        console.log('[DEBUG] Bluesky auth successful')
+      }
+    } catch (error) {
+      console.error('[ERROR] Bluesky initialization failed:', error)
+      throw error
+    }
+
+    if (this.debug) {
+      console.log('[DEBUG] All social connections initialized successfully')
+    }
+  }
+
+  /**
+   * Converts Mastodon HTML content to plain text while preserving basic formatting
+   * @private
+   */
+  cleanMastodonContent(html) {
+    // Replace <br> with newlines
+    let text = html.replace(/<br\s*\/?>/gi, '\n')
+    
+    // Replace <p> with double newlines
+    text = text.replace(/<p>(.*?)<\/p>/gi, '$1\n\n')
+    
+    // Preserve links
+    text = text.replace(/<a[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi, '$2 ($1)')
+    
+    // Remove all other HTML tags
+    text = text.replace(/<[^>]*>/g, '')
+    
+    // Fix multiple newlines
+    text = text.replace(/\n{3,}/g, '\n\n')
+    
+    // Trim extra whitespace
+    return text.trim()
+  }
+
+  /**
+   * Handles rate limiting and retries
+   * @private
+   */
+  async withRateLimit(fn, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await fn()
+      } catch (error) {
+        if (error.message.includes('rate limit') || error.status === 429) {
+          const waitTime = Math.pow(2, i) * 1000 // Exponential backoff
+          if (this.debug) {
+            console.log(`[DEBUG] Rate limited, waiting ${waitTime}ms before retry ${i + 1}/${retries}`)
+          }
+          await new Promise(resolve => setTimeout(resolve, waitTime))
+          continue
+        }
+        throw error
+      }
+    }
+    throw new Error(`Failed after ${retries} retries`)
   }
 
   /**
@@ -80,45 +200,60 @@ export class SocialSyncService {
    * @throws {Error} If sync fails
    */
   async syncFromBluesky() {
-    const bskyPosts = await this.bsky.getAuthorFeed({
-      actor: this.config.blueskyUsername,
-      limit: this.postsToSync
-    })
+    const bskyPosts = await this.withRateLimit(() =>
+      this.bsky.getAuthorFeed({
+        actor: this.config.blueskyUsername,
+        limit: this.postsToSync
+      })
+    )
 
     const syncedPosts = []
     for (const post of bskyPosts.data.feed) {
-      // Skip if post is older than last sync
-      if (this.lastSync && new Date(post.post.indexedAt) <= new Date(this.lastSync)) {
-        continue
-      }
+      try {
+        // Skip if post is older than last sync
+        if (this.lastSync && new Date(post.post.indexedAt) <= new Date(this.lastSync)) {
+          if (this.debug) console.log('[DEBUG] Skipping older post')
+          continue
+        }
 
-      // Skip reposts if configured
-      if (this.ignoreReposts && post.post.record.reply) {
-        continue
-      }
+        // Skip reposts if configured
+        if (this.ignoreReposts && post.post.record.reply) {
+          if (this.debug) console.log('[DEBUG] Skipping reply/repost')
+          continue
+        }
 
-      const text = post.post.record.text
-      if (this.debug) {
-        console.log(`${this.dryRun ? '[DRY RUN] Would sync' : 'Syncing'} Bluesky post:`, text)
-      }
+        const text = post.post.record.text
+        if (this.debug) {
+          console.log(`[DEBUG] Processing Bluesky post: ${text.substring(0, 50)}...`)
+        }
 
-      let targetId = 'DRY_RUN'
-      if (!this.dryRun) {
-        // Post to Mastodon
-        const mastoPost = await this.masto.v1.statuses.create({
-          status: text,
-          visibility: 'public'
+        let targetId = 'DRY_RUN'
+        if (!this.dryRun) {
+          const mastoPost = await this.withRateLimit(() =>
+            this.mastodonRequest('/api/v1/statuses', {
+              method: 'POST',
+              body: JSON.stringify({
+                status: text,
+                visibility: 'public'
+              })
+            })
+          )
+          targetId = mastoPost.id
+        }
+
+        syncedPosts.push({
+          source: 'bluesky',
+          sourceId: post.post.uri,
+          targetId,
+          text,
+          simulated: this.dryRun,
+          timestamp: post.post.indexedAt
         })
-        targetId = mastoPost.id
+      } catch (error) {
+        console.error(`[ERROR] Failed to sync Bluesky post ${post.post.uri}:`, error)
+        // Continue with next post instead of failing completely
+        continue
       }
-
-      syncedPosts.push({
-        source: 'bluesky',
-        sourceId: post.post.uri,
-        targetId,
-        text,
-        simulated: this.dryRun
-      })
     }
 
     return syncedPosts
@@ -131,40 +266,69 @@ export class SocialSyncService {
    * @throws {Error} If sync fails
    */
   async syncFromMastodon() {
-    const mastodonPosts = await this.masto.v1.accounts.$select(this.config.mastodonUsername)
-      .statuses.list({
-        limit: this.postsToSync,
-        excludeReblogs: this.ignoreReposts
+    // First get the timeline directly
+    const timelinePosts = await this.withRateLimit(() => 
+      this.mastodonRequest('/api/v1/timelines/home', {
+        params: {
+          limit: this.postsToSync
+        }
       })
+    )
+
+    if (this.debug) {
+      console.log(`[DEBUG] Retrieved ${timelinePosts.length} posts from Mastodon timeline`)
+    }
 
     const syncedPosts = []
-    for (const post of mastodonPosts) {
-      // Skip if post is older than last sync
-      if (this.lastSync && new Date(post.createdAt) <= new Date(this.lastSync)) {
+    for (const post of timelinePosts) {
+      try {
+        // Skip if post is older than last sync
+        if (this.lastSync && new Date(post.created_at) <= new Date(this.lastSync)) {
+          if (this.debug) console.log('[DEBUG] Skipping older post')
+          continue
+        }
+
+        // Skip reposts if configured
+        if (this.ignoreReposts && post.reblog) {
+          if (this.debug) console.log('[DEBUG] Skipping reblog')
+          continue
+        }
+
+        // Skip if not our own post
+        if (post.account.username.toLowerCase() !== this.config.mastodonUsername.toLowerCase()) {
+          if (this.debug) console.log('[DEBUG] Skipping post from other user:', post.account.username)
+          continue
+        }
+
+        const text = this.cleanMastodonContent(post.content)
+        if (this.debug) {
+          console.log(`[DEBUG] Processing Mastodon post: ${text.substring(0, 50)}...`)
+        }
+
+        let targetId = 'DRY_RUN'
+        if (!this.dryRun) {
+          const bskyPost = await this.withRateLimit(() =>
+            this.bsky.post({
+              text: text,
+              createdAt: new Date().toISOString()
+            })
+          )
+          targetId = bskyPost.uri
+        }
+
+        syncedPosts.push({
+          source: 'mastodon',
+          sourceId: post.id,
+          targetId,
+          text,
+          simulated: this.dryRun,
+          timestamp: post.created_at
+        })
+      } catch (error) {
+        console.error(`[ERROR] Failed to sync Mastodon post ${post.id}:`, error)
+        // Continue with next post instead of failing completely
         continue
       }
-
-      const text = post.content.replace(/<[^>]*>/g, '') // Remove HTML tags
-      if (this.debug) {
-        console.log(`${this.dryRun ? '[DRY RUN] Would sync' : 'Syncing'} Mastodon post:`, text)
-      }
-
-      let targetId = 'DRY_RUN'
-      if (!this.dryRun) {
-        // Post to Bluesky
-        const bskyPost = await this.bsky.post({
-          text: text
-        })
-        targetId = bskyPost.uri
-      }
-
-      syncedPosts.push({
-        source: 'mastodon',
-        sourceId: post.id,
-        targetId,
-        text,
-        simulated: this.dryRun
-      })
     }
 
     return syncedPosts
