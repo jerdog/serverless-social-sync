@@ -1,0 +1,34 @@
+name = "social-sync-worker"
+main = "./src/worker.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat_v2"]
+account_id = ""
+
+# KV Namespace for storing sync state
+kv_namespaces = [
+  { binding = "SYNC_STORE", id = "YOUR_KV_NAMESPACE_ID" }
+]
+
+[triggers]
+crons = ["*/5 * * * *"]  # Run every 5 minutes (default)
+
+[vars]
+DEBUG = "false"
+POSTS_TO_SYNC = "10"
+IGNORE_REPOSTS = "true"
+DRY_RUN = "false"  # Set to "true" to simulate sync without posting
+MASTODON_URL = "https://mastodon.social"  # Change this to your instance
+MASTODON_USERNAME = "your-username"  # Your Mastodon username
+BLUESKY_USERNAME = "your-handle.bsky.social"   # Your Bluesky handle
+
+# Secrets that should be set using `wrangler secret put`:
+# - MASTODON_ACCESS_TOKEN
+# - BLUESKY_PASSWORD
+
+# Node.js build settings
+[build]
+command = "npm install"
+
+# Enable observability
+[observability]
+enabled = true

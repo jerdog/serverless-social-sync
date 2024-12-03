@@ -1,0 +1,31 @@
+{
+  "name": "serverless-social-sync",
+  "version": "1.0.0",
+  "description": "Serverless app to sync posts between Bluesky and Mastodon",
+  "main": "./src/worker.js",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "dev:remote": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test:trigger": "curl \"http://localhost:8787/__scheduled?cron=*+*+*+*+*\""
+  },
+  "dependencies": {
+    "@atproto/api": "^0.6.20",
+    "masto": "^6.4.1"
+  },
+  "devDependencies": {
+    "@rollup/plugin-inject": "^5.0.5",
+    "wrangler": "^3.91.0"
+  },
+  "overrides": {
+    "sourcemap-codec": "@jridgewell/sourcemap-codec"
+  },
+  "resolutions": {
+    "sourcemap-codec": "@jridgewell/sourcemap-codec",
+    "rollup-plugin-inject": "@rollup/plugin-inject"
+  },
+  "engines": {
+    "node": ">=20.5.0"
+  }
+}

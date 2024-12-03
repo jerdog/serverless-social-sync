@@ -1,0 +1,21 @@
+# Debug mode (true/false)
+DEBUG="true"
+
+# Number of posts to sync in each direction
+POSTS_TO_SYNC="10"
+
+# Whether to ignore reposts/reblogs (true/false)
+IGNORE_REPOSTS="true"
+
+# Mastodon Configuration
+MASTODON_URL="https://mastodon.social"
+MASTODON_USERNAME="your-username"
+MASTODON_ACCESS_TOKEN="your-mastodon-access-token"
+
+# Bluesky Configuration
+BLUESKY_USERNAME="your-handle.bsky.social"
+BLUESKY_PASSWORD="your-app-password"
+
+# Optional: Set a specific last sync time for testing
+# Format: ISO 8601 timestamp
+# LAST_SYNC="2023-12-01T00:00:00Z"
